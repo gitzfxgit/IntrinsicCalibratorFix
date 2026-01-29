@@ -19,6 +19,7 @@ class CalibrateTab(QWidget):
 
         # create a list view from FileListModel
         self.model = model
+        self.current_image = None  # Initialize current_image
         view = QListView()
         view.setModel(self.model)
         view.selectionModel().selectionChanged.connect(
@@ -36,13 +37,12 @@ class CalibrateTab(QWidget):
         self.board_imv.show()
         layout.addWidget(self.board_imv, 1, 2)
 
-
         self.parameter_detection_dict = [
             {
                 'name': 'Aruco Dictionary',
                 'type': 'list',
-                'values': ["4x4_1000"],
-                'value': "4x4_1000"
+                'limits': ["4x4_1000"],
+                'value': "4x4_1000",
             },
             {
                 'name': 'Columns',
@@ -117,17 +117,27 @@ class CalibrateTab(QWidget):
         """
         When the selection changes, load the image into the image view
         """
-        print("selection changed")
-        values = tree_state.getValues()
+        # Only run detection when the "Run Detection" button is clicked
+        if tree_change[0][0].name() != 'Run Detection':
+            return
+            
+        print("Running detection")
+        # Get values from individual parameters instead of getValues()
+        aruco_dict_name = self.parameter_detection.child('Aruco Dictionary').value()
+        columns = self.parameter_detection.child('Columns').value()
+        rows = self.parameter_detection.child('Rows').value()
+        marker_size = self.parameter_detection.child('Marker Size').value()
+        square_size = self.parameter_detection.child('Square Size').value()
+        
         aruco_dict = cv2.aruco.getPredefinedDictionary({
                 "aruco_orig" : cv2.aruco.DICT_ARUCO_ORIGINAL,
                 "4x4_250"    : cv2.aruco.DICT_4X4_250,
                 "4x4_1000"    : cv2.aruco.DICT_4X4_1000,
                 "5x5_250"    : cv2.aruco.DICT_5X5_250,
                 "6x6_250"    : cv2.aruco.DICT_6X6_250,
-                "7x7_250"    : cv2.aruco.DICT_7X7_250}[values['Aruco Dictionary'][0]])
-        print(values['Aruco Dictionary'][0])
-        self.charuco_board = cv2.aruco.CharucoBoard((values['Columns'][0], values['Rows'][0]), values['Square Size'][0], values['Marker Size'][0], aruco_dict)
+                "7x7_250"    : cv2.aruco.DICT_7X7_250}[aruco_dict_name])
+        print(aruco_dict_name)
+        self.charuco_board = cv2.aruco.CharucoBoard((columns, rows), square_size, marker_size, aruco_dict)
         aruco_parameters = cv2.aruco.DetectorParameters()
         #aruco_parameters.cornerRefinementMethod = cv2.aruco.CORNER_REFINE_SUBPIX
         charuco_detector = cv2.aruco.CharucoDetector(self.charuco_board, detectorParams=aruco_parameters)
@@ -137,22 +147,57 @@ class CalibrateTab(QWidget):
         self.board_imv.setImage(board_img.T)
 
         # detect board in images
-        for image in self.model.images:
+        for i, image in enumerate(self.model.images):
             img = cv2.imread(image.file_path, 0)
             image.board_detections = charuco_detector.detectBoard(img)
+            charuco_corners, charuco_ids, marker_corners, marker_ids = image.board_detections
+            print(f"Image {i} ({image.file_path}):")
+            print(f"  Charuco corners: {charuco_corners.shape if charuco_corners is not None else None}")
+            print(f"  Charuco IDs: {charuco_ids.shape if charuco_ids is not None else None}")
+            print(f"  Marker corners: {len(marker_corners) if marker_corners is not None else None}")
+            print(f"  Marker IDs: {marker_ids.shape if marker_ids is not None else None}")
 
 
     def handle_tree_calibration_changed(self, tree_state, tree_change):
         """
         When the selection changes, load the image into the image view
         """
-        charuco_corners, charuco_ids = zip(*[image.board_detections[:2] for image in self.model.images if image.board_detections is not None])
-        print(charuco_corners)
-        print(charuco_ids)
-        reproj_err, self.intrinsics, self.distortion, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(charuco_corners, charuco_ids, self.charuco_board, self.current_image.shape, None, None)
-        print("Reprojection error: {}".format(reproj_err))
-
-
-    
+        # Only run calibration when the "Run Calibration" button is clicked
+        if tree_change[0][0].name() != 'Run Calibration':
+            return
         
-
+        print("Running calibration...")
+        
+        # Check if charuco_board exists
+        if not hasattr(self, 'charuco_board'):
+            print("No charuco board configured. Run detection first.")
+            return
+            
+        # Filter out None detections and those with None corners
+        detections = [(corners, ids) for image in self.model.images 
+                      if image.board_detections is not None 
+                      for corners, ids in [image.board_detections[:2]]
+                      if corners is not None and ids is not None and len(corners) > 0]
+        
+        print(f"Found {len(detections)} valid detections out of {len(self.model.images)} images")
+        
+        if not detections:
+            print("No valid board detections found. Run detection first and ensure boards are detected in images.")
+            return
+        
+        # Get image shape from the first image
+        first_image = self.model.images[0]
+        img = cv2.imread(first_image.file_path, 0)
+        image_shape = img.shape
+            
+        charuco_corners, charuco_ids = zip(*detections)
+        print(f"Number of detection sets: {len(charuco_corners)}")
+        for i, (corners, ids) in enumerate(zip(charuco_corners, charuco_ids)):
+            print(f"  Image {i}: {len(corners)} corners, {len(ids)} ids\n")
+        
+        reproj_err, self.intrinsics, self.distortion, rvecs, tvecs = cv2.aruco.calibrateCameraCharuco(charuco_corners, charuco_ids, self.charuco_board, image_shape, None, None)
+        print(f"intrinsics = {self.intrinsics}\n")
+        print(f"distortion = {self.distortion}\n")
+        print(f"rvecs = {rvecs}\n")
+        print(f"tvecs= {tvecs}\n")
+        print("Reprojection error: {}".format(reproj_err))
